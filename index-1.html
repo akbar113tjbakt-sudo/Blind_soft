@@ -1,0 +1,1057 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no"/>
+<meta name="theme-color" content="#0a0f1e"/>
+<meta name="apple-mobile-web-app-capable" content="yes"/>
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
+<title>ВидениеПути — Навигатор для незрячих</title>
+<link rel="manifest" href="manifest.json"/>
+
+<!-- Leaflet -->
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css"/>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+
+<!-- TensorFlow.js + COCO-SSD (jsdelivr — стабильный CDN) -->
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.10.0/dist/tf.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js"></script>
+
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Rajdhani:wght@300;400;500;600;700&family=Share+Tech+Mono&display=swap');
+
+  :root {
+    --bg:       #03070f;
+    --surface:  #080e1c;
+    --panel:    #0d1526;
+    --border:   #1a2a4a;
+    --accent:   #00d4ff;
+    --accent2:  #ff6b35;
+    --green:    #00ff88;
+    --red:      #ff2d55;
+    --yellow:   #ffd60a;
+    --text:     #e0eeff;
+    --muted:    #4a6080;
+    --glow:     0 0 20px rgba(0,212,255,0.4);
+    --glow2:    0 0 20px rgba(255,107,53,0.4);
+  }
+
+  * { margin:0; padding:0; box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+
+  html, body {
+    height: 100%; overflow: hidden;
+    font-family: 'Rajdhani', sans-serif;
+    background: var(--bg); color: var(--text);
+  }
+
+  /* ── LAYOUT ─────────────────────────────── */
+  #app { display:flex; flex-direction:column; height:100dvh; }
+
+  /* ── HEADER ─────────────────────────────── */
+  #header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 10px 16px;
+    background: linear-gradient(180deg, #0a1428 0%, rgba(8,14,28,0.95) 100%);
+    border-bottom: 1px solid var(--border);
+    backdrop-filter: blur(12px);
+    z-index: 100; flex-shrink: 0;
+  }
+  #header h1 {
+    font-size: 1.3rem; font-weight: 700; letter-spacing: 2px;
+    color: var(--accent); text-shadow: var(--glow);
+    text-transform: uppercase;
+  }
+  #header h1 span { color: var(--text); }
+  #status-dot {
+    width: 10px; height: 10px; border-radius: 50%;
+    background: var(--muted); transition: background 0.3s;
+    box-shadow: 0 0 8px currentColor;
+  }
+  #status-dot.active { background: var(--green); }
+  #status-dot.warning { background: var(--yellow); }
+  #status-dot.danger { background: var(--red); }
+
+  /* ── AI ENGINE TOGGLE ───────────────────── */
+  #engine-bar {
+    display: flex; gap: 6px; padding: 8px 16px;
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+  .engine-btn {
+    flex: 1; padding: 7px 10px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: transparent; color: var(--muted);
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 0.72rem; cursor: pointer;
+    transition: all 0.2s; letter-spacing: 1px;
+    text-transform: uppercase;
+  }
+  .engine-btn.active {
+    border-color: var(--accent); color: var(--accent);
+    background: rgba(0,212,255,0.08);
+    box-shadow: inset 0 0 12px rgba(0,212,255,0.1), var(--glow);
+  }
+  .engine-btn.active.tf { border-color: var(--accent2); color: var(--accent2);
+    background: rgba(255,107,53,0.08); box-shadow: inset 0 0 12px rgba(255,107,53,0.1), var(--glow2); }
+
+  /* ── MAIN AREA ───────────────────────────── */
+  #main { flex: 1; display: flex; overflow: hidden; position: relative; }
+
+  /* ── MAP ─────────────────────────────────── */
+  #map-container { flex: 1; position: relative; }
+  #map { width: 100%; height: 100%; }
+  .leaflet-tile { filter: invert(1) hue-rotate(180deg) brightness(0.8) saturate(0.6); }
+
+  /* ── CAMERA PANEL ────────────────────────── */
+  #cam-panel {
+    width: 200px; flex-shrink: 0;
+    background: var(--panel);
+    border-left: 1px solid var(--border);
+    display: flex; flex-direction: column;
+    overflow: hidden;
+  }
+  #cam-header {
+    padding: 8px 12px;
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 0.7rem; letter-spacing: 2px; color: var(--muted);
+    border-bottom: 1px solid var(--border);
+    text-transform: uppercase;
+  }
+  #cam-wrapper { position: relative; flex-shrink: 0; }
+  #camera { width: 100%; display: block; aspect-ratio: 4/3; object-fit: cover; }
+  #overlay-canvas {
+    position: absolute; top:0; left:0; width:100%; height:100%;
+    pointer-events: none;
+  }
+  #detections-list {
+    flex: 1; overflow-y: auto; padding: 8px;
+    scrollbar-width: thin; scrollbar-color: var(--border) transparent;
+  }
+  .det-item {
+    display: flex; align-items: center; gap: 6px;
+    padding: 5px 8px; margin-bottom: 4px;
+    border-radius: 4px; border: 1px solid var(--border);
+    background: rgba(255,255,255,0.02);
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 0.68rem; color: var(--text);
+    animation: fadeIn 0.2s ease;
+  }
+  .det-item.danger { border-color: var(--red); color: var(--red); background: rgba(255,45,85,0.08); }
+  .det-item.warn   { border-color: var(--yellow); color: var(--yellow); background: rgba(255,214,10,0.08); }
+  .det-item.safe   { border-color: var(--green); color: var(--green); background: rgba(0,255,136,0.06); }
+  .det-icon { font-size: 1rem; }
+  .det-score { margin-left: auto; opacity: 0.6; font-size: 0.6rem; }
+  @keyframes fadeIn { from { opacity:0; transform:translateX(8px); } to { opacity:1; transform:none; } }
+
+  /* ── BOTTOM CONTROLS ─────────────────────── */
+  #bottom {
+    background: var(--panel);
+    border-top: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+  #speech-output {
+    padding: 10px 16px 6px;
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 0.75rem; color: var(--accent);
+    min-height: 36px; letter-spacing: 0.5px;
+    border-bottom: 1px solid var(--border);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  #speech-output::before { content: '▶ '; opacity: 0.5; }
+
+  #controls {
+    display: flex; gap: 8px; padding: 10px 16px 14px;
+    align-items: center;
+  }
+  .ctrl-btn {
+    flex: 1; padding: 12px 8px;
+    border-radius: 8px; border: 1px solid var(--border);
+    background: transparent; color: var(--text);
+    font-family: 'Rajdhani', sans-serif;
+    font-size: 0.85rem; font-weight: 600; cursor: pointer;
+    letter-spacing: 1px; text-transform: uppercase;
+    transition: all 0.15s; display: flex;
+    flex-direction: column; align-items: center; gap: 2px;
+  }
+  .ctrl-btn .icon { font-size: 1.4rem; }
+  .ctrl-btn:active { transform: scale(0.96); }
+  .ctrl-btn.primary {
+    border-color: var(--accent); color: var(--accent);
+    background: rgba(0,212,255,0.06);
+  }
+  .ctrl-btn.primary.recording {
+    border-color: var(--red); color: var(--red);
+    background: rgba(255,45,85,0.08);
+    animation: pulse 1s infinite;
+  }
+  .ctrl-btn.secondary { border-color: var(--accent2); color: var(--accent2); background: rgba(255,107,53,0.06); }
+  .ctrl-btn.success { border-color: var(--green); color: var(--green); background: rgba(0,255,136,0.06); }
+  @keyframes pulse { 0%,100%{ box-shadow:0 0 0 0 rgba(255,45,85,0.4); } 50%{ box-shadow:0 0 0 8px rgba(255,45,85,0); } }
+
+  /* ── DESTINATION MODAL ───────────────────── */
+  #dest-modal {
+    display: none; position: fixed; inset: 0; z-index: 1000;
+    background: rgba(3,7,15,0.92); backdrop-filter: blur(8px);
+    align-items: center; justify-content: center;
+  }
+  #dest-modal.show { display: flex; }
+  #dest-box {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 12px; padding: 24px; width: 320px; max-width: 92vw;
+    box-shadow: 0 0 40px rgba(0,212,255,0.15);
+  }
+  #dest-box h2 { font-size: 1.1rem; font-weight: 600; letter-spacing: 2px;
+    color: var(--accent); text-transform: uppercase; margin-bottom: 16px; }
+  #dest-input {
+    width: 100%; padding: 12px; border-radius: 6px;
+    border: 1px solid var(--border); background: var(--surface);
+    color: var(--text); font-family: 'Rajdhani', sans-serif;
+    font-size: 1rem; outline: none; margin-bottom: 12px;
+    transition: border-color 0.2s;
+  }
+  #dest-input:focus { border-color: var(--accent); }
+  #dest-input::placeholder { color: var(--muted); }
+  .modal-actions { display: flex; gap: 8px; }
+  .modal-btn {
+    flex: 1; padding: 11px; border-radius: 6px; border: none;
+    font-family: 'Rajdhani', sans-serif; font-weight: 700;
+    font-size: 0.9rem; letter-spacing: 1px; cursor: pointer;
+    text-transform: uppercase; transition: all 0.15s;
+  }
+  .modal-btn.confirm { background: var(--accent); color: var(--bg); }
+  .modal-btn.cancel  { background: var(--border); color: var(--muted); }
+
+  /* ── SCAN OVERLAY ────────────────────────── */
+  #scan-ring {
+    position: fixed; inset: 0; pointer-events: none; z-index: 500;
+    display: flex; align-items: center; justify-content: center;
+    opacity: 0; transition: opacity 0.3s;
+  }
+  #scan-ring.show { opacity: 1; }
+  #scan-ring::before {
+    content: '';
+    width: 80px; height: 80px; border-radius: 50%;
+    border: 3px solid var(--accent);
+    animation: scan-pulse 1s ease-out infinite;
+  }
+  @keyframes scan-pulse {
+    0%   { transform: scale(1); opacity: 1; }
+    100% { transform: scale(3); opacity: 0; }
+  }
+
+  /* ── ALERT BANNER ────────────────────────── */
+  #alert-banner {
+    position: fixed; top: -80px; left: 0; right: 0; z-index: 900;
+    padding: 14px 20px; text-align: center;
+    font-family: 'Rajdhani', sans-serif; font-weight: 700;
+    font-size: 1.1rem; letter-spacing: 2px; text-transform: uppercase;
+    transition: top 0.3s cubic-bezier(0.34,1.56,0.64,1);
+  }
+  #alert-banner.show { top: 56px; }
+  #alert-banner.danger { background: rgba(255,45,85,0.95); color: #fff; }
+  #alert-banner.warning { background: rgba(255,214,10,0.95); color: #000; }
+  #alert-banner.info { background: rgba(0,212,255,0.9); color: var(--bg); }
+
+  /* ── API KEY NOTICE ──────────────────────── */
+  #api-notice {
+    display: none; position: fixed; bottom: 80px; left: 50%; transform: translateX(-50%);
+    background: var(--panel); border: 1px solid var(--accent2);
+    border-radius: 8px; padding: 12px 16px; z-index: 800;
+    font-family: 'Share Tech Mono', monospace; font-size: 0.7rem;
+    color: var(--accent2); max-width: 280px; text-align: center; line-height: 1.5;
+  }
+
+  /* ── LOADING ─────────────────────────────── */
+  #loading {
+    position: fixed; inset: 0; z-index: 2000;
+    background: var(--bg); display: flex; flex-direction: column;
+    align-items: center; justify-content: center; gap: 20px;
+  }
+  #loading .logo {
+    font-family: 'Rajdhani', sans-serif; font-size: 2rem; font-weight: 700;
+    color: var(--accent); text-shadow: var(--glow); letter-spacing: 4px;
+  }
+  #loading .sub { font-family: 'Share Tech Mono', monospace; font-size: 0.7rem;
+    color: var(--muted); letter-spacing: 3px; }
+  #load-bar { width: 200px; height: 2px; background: var(--border); border-radius: 2px; overflow: hidden; }
+  #load-fill { height: 100%; width: 0; background: var(--accent); transition: width 0.4s; box-shadow: var(--glow); }
+
+  /* ── TF STATUS ───────────────────────────── */
+  #tf-status {
+    position: absolute; bottom: 8px; left: 8px; right: 8px;
+    background: rgba(3,7,15,0.85); border: 1px solid var(--border);
+    border-radius: 4px; padding: 4px 8px;
+    font-family: 'Share Tech Mono', monospace; font-size: 0.62rem;
+    color: var(--muted); text-align: center; z-index: 10;
+    transition: opacity 0.5s;
+  }
+  #tf-status.ok   { color: var(--green); border-color: var(--green); }
+  #tf-status.err  { color: var(--red);   border-color: var(--red);   }
+  #tf-status.load { color: var(--yellow);border-color: var(--yellow);}
+
+  /* ── ROUTE LINE ──────────────────────────── */
+  .route-line { stroke: var(--accent); stroke-width: 4; stroke-dasharray: 8 4; }
+
+  /* ── SETTINGS FAB ────────────────────────── */
+  #settings-fab {
+    position: absolute; top: 12px; right: 12px; z-index: 500;
+    width: 40px; height: 40px; border-radius: 50%;
+    background: rgba(8,14,28,0.9); border: 1px solid var(--border);
+    color: var(--muted); font-size: 1.1rem; cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+    backdrop-filter: blur(8px); transition: all 0.2s;
+  }
+  #settings-fab:hover { border-color: var(--accent); color: var(--accent); }
+
+  /* ── SETTINGS DRAWER ─────────────────────── */
+  #settings-drawer {
+    position: fixed; top: 0; right: -320px; width: 300px; height: 100%;
+    background: var(--panel); border-left: 1px solid var(--border);
+    z-index: 1500; padding: 60px 20px 20px;
+    transition: right 0.3s ease; overflow-y: auto;
+  }
+  #settings-drawer.open { right: 0; }
+  #settings-drawer h3 { font-size: 0.8rem; letter-spacing: 3px; color: var(--muted);
+    text-transform: uppercase; margin-bottom: 16px; }
+  .setting-row { display: flex; align-items: center; justify-content: space-between;
+    padding: 12px 0; border-bottom: 1px solid var(--border); }
+  .setting-label { font-size: 0.95rem; }
+  .setting-hint { font-family: 'Share Tech Mono', monospace; font-size: 0.65rem; color: var(--muted); }
+  .toggle { width: 44px; height: 24px; background: var(--border); border-radius: 12px;
+    position: relative; cursor: pointer; transition: background 0.2s; flex-shrink: 0; }
+  .toggle.on { background: var(--accent); }
+  .toggle::after { content: ''; width: 18px; height: 18px; background: #fff;
+    border-radius: 50%; position: absolute; top: 3px; left: 3px;
+    transition: transform 0.2s; }
+  .toggle.on::after { transform: translateX(20px); }
+  #api-key-input {
+    width: 100%; padding: 8px 10px; border-radius: 6px; margin-top: 8px;
+    border: 1px solid var(--border); background: var(--surface);
+    color: var(--text); font-family: 'Share Tech Mono', monospace;
+    font-size: 0.7rem; outline: none;
+  }
+  #api-key-input:focus { border-color: var(--accent); }
+  #save-key-btn {
+    width: 100%; margin-top: 8px; padding: 9px;
+    border-radius: 6px; border: none; background: var(--accent);
+    color: var(--bg); font-family: 'Rajdhani', sans-serif;
+    font-weight: 700; font-size: 0.85rem; cursor: pointer;
+    letter-spacing: 1px; text-transform: uppercase;
+  }
+  .close-drawer {
+    position: absolute; top: 16px; right: 16px;
+    background: transparent; border: none; color: var(--muted);
+    font-size: 1.4rem; cursor: pointer;
+  }
+
+  @media (max-width: 480px) {
+    #cam-panel { width: 140px; }
+    .ctrl-btn .icon { font-size: 1.2rem; }
+    .ctrl-btn { font-size: 0.75rem; }
+  }
+</style>
+</head>
+<body>
+
+<!-- LOADING SCREEN -->
+<div id="loading">
+  <div class="logo">ВИДЕНИЕПУТИ</div>
+  <div class="sub">Навигатор для незрячих · v2.0</div>
+  <div id="load-bar"><div id="load-fill"></div></div>
+  <div class="sub" id="load-msg">Инициализация...</div>
+</div>
+
+<!-- ALERT BANNER -->
+<div id="alert-banner"></div>
+
+<!-- SCAN OVERLAY -->
+<div id="scan-ring"></div>
+
+<!-- SETTINGS DRAWER -->
+<div id="settings-drawer">
+  <button class="close-drawer" onclick="toggleSettings()">×</button>
+  <h3>Настройки</h3>
+
+  <div class="setting-row">
+    <div>
+      <div class="setting-label">🔊 Голосовые подсказки</div>
+      <div class="setting-hint">Text-to-Speech</div>
+    </div>
+    <div class="toggle on" id="tts-toggle" onclick="toggleSetting('tts')"></div>
+  </div>
+
+  <div class="setting-row">
+    <div>
+      <div class="setting-label">📳 Вибрация</div>
+      <div class="setting-hint">При обнаружении угроз</div>
+    </div>
+    <div class="toggle on" id="vib-toggle" onclick="toggleSetting('vib')"></div>
+  </div>
+
+  <div class="setting-row">
+    <div>
+      <div class="setting-label">🔄 Авто-сканирование</div>
+      <div class="setting-hint">Каждые 2 секунды</div>
+    </div>
+    <div class="toggle on" id="auto-toggle" onclick="toggleSetting('auto')"></div>
+  </div>
+
+  <div class="setting-row">
+    <div>
+      <div class="setting-label">🗺️ Голос навигации</div>
+      <div class="setting-hint">Повороты и маршрут</div>
+    </div>
+    <div class="toggle on" id="nav-toggle" onclick="toggleSetting('nav')"></div>
+  </div>
+
+  <h3 style="margin-top:24px">Claude Vision API</h3>
+  <div class="setting-hint" style="margin-bottom:8px;line-height:1.5">
+    Для глубокого анализа сцены (контекст, текст, ситуация)<br>
+    Получить ключ: console.anthropic.com
+  </div>
+  <input id="api-key-input" type="password" placeholder="sk-ant-api03-..."/>
+  <button id="save-key-btn" onclick="saveApiKey()">💾 Сохранить ключ</button>
+</div>
+
+<!-- APP -->
+<div id="app">
+  <!-- HEADER -->
+  <div id="header">
+    <h1>ВИДЕНИЕ<span>ПУТИ</span></h1>
+    <div style="display:flex;align-items:center;gap:10px;">
+      <span id="coords-display" style="font-family:'Share Tech Mono',monospace;font-size:0.65rem;color:var(--muted)">GPS...</span>
+      <div id="status-dot"></div>
+    </div>
+  </div>
+
+  <!-- ENGINE BAR -->
+  <div id="engine-bar">
+    <button class="engine-btn active" id="btn-tf" onclick="setEngine('tf')">⚡ TensorFlow</button>
+    <button class="engine-btn" id="btn-claude" onclick="setEngine('claude')">🧠 Claude Vision</button>
+    <button class="engine-btn active tf" id="btn-both" onclick="setEngine('both')">🔀 Оба</button>
+  </div>
+
+  <!-- MAIN -->
+  <div id="main">
+    <!-- MAP -->
+    <div id="map-container">
+      <div id="map"></div>
+      <button id="settings-fab" onclick="toggleSettings()">⚙</button>
+    </div>
+
+    <!-- CAMERA PANEL -->
+    <div id="cam-panel">
+      <div id="cam-header">📷 Камера</div>
+      <div id="cam-wrapper">
+        <video id="camera" autoplay muted playsinline></video>
+        <canvas id="overlay-canvas"></canvas>
+        <div id="tf-status" class="load">⏳ Загрузка модели...</div>
+      </div>
+      <div id="detections-list">
+        <div class="det-item safe">
+          <span class="det-icon">✓</span>
+          <span>Готов</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- BOTTOM -->
+  <div id="bottom">
+    <div id="speech-output">Нажмите кнопку для начала работы</div>
+    <div id="controls">
+      <button class="ctrl-btn primary" id="scan-btn" onclick="manualScan()">
+        <span class="icon">👁</span>Сканировать
+      </button>
+      <button class="ctrl-btn secondary" id="nav-btn" onclick="openDestModal()">
+        <span class="icon">🗺</span>Маршрут
+      </button>
+      <button class="ctrl-btn success" id="locate-btn" onclick="locateMe()">
+        <span class="icon">📍</span>Где я?
+      </button>
+    </div>
+  </div>
+</div>
+
+<!-- DESTINATION MODAL -->
+<div id="dest-modal">
+  <div id="dest-box">
+    <h2>🗺 Куда идём?</h2>
+    <input id="dest-input" type="text" placeholder="Введите адрес или место..."/>
+    <div class="modal-actions">
+      <button class="modal-btn confirm" onclick="startNavigation()">Начать</button>
+      <button class="modal-btn cancel" onclick="closeDestModal()">Отмена</button>
+    </div>
+  </div>
+</div>
+
+<div id="api-notice">⚠ Добавьте API ключ Claude в настройках для глубокого анализа</div>
+
+<script>
+// ══════════════════════════════════════════════
+// STATE
+// ══════════════════════════════════════════════
+const state = {
+  engine: 'both',
+  settings: { tts: true, vib: true, auto: true, nav: true },
+  claudeKey: localStorage.getItem('claude_key') || '',
+  tfModel: null, tfLoaded: false,
+  map: null, userMarker: null, routeLayer: null,
+  watchId: null,
+  lat: null, lng: null,
+  scanning: false,
+  autoInterval: null,
+  destination: null,
+  lastSpeak: 0,
+};
+
+// ══════════════════════════════════════════════
+// INIT
+// ══════════════════════════════════════════════
+async function init() {
+  setLoad(10, 'Загрузка карты...');
+  initMap();
+
+  setLoad(30, 'Запрос GPS...');
+  await startGPS();
+
+  setLoad(55, 'Инициализация камеры...');
+  await startCamera();
+
+  setLoad(75, 'Загрузка TensorFlow модели...');
+  await loadTFModel();
+
+  setLoad(95, 'Запуск автосканирования...');
+  startAutoScan();
+
+  setLoad(100, 'Готово!');
+  setTimeout(() => {
+    document.getElementById('loading').style.opacity = '0';
+    setTimeout(() => document.getElementById('loading').style.display = 'none', 400);
+    document.getElementById('loading').style.transition = 'opacity 0.4s';
+    speak('Добро пожаловать в ВидениеПути. Навигатор активирован.');
+    if (state.claudeKey) {
+      setEngineStatus('Все системы активны');
+    } else {
+      setEngineStatus('TensorFlow активен. Добавьте ключ Claude для расширенного анализа.');
+      document.getElementById('api-notice').style.display = 'block';
+      setTimeout(() => document.getElementById('api-notice').style.display = 'none', 5000);
+    }
+  }, 400);
+}
+
+function setLoad(pct, msg) {
+  document.getElementById('load-fill').style.width = pct + '%';
+  document.getElementById('load-msg').textContent = msg;
+}
+
+// ══════════════════════════════════════════════
+// MAP
+// ══════════════════════════════════════════════
+function initMap() {
+  state.map = L.map('map', { zoomControl: false, attributionControl: false });
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    maxZoom: 19, attribution: '© OSM'
+  }).addTo(state.map);
+  state.map.setView([55.751, 37.618], 15);
+
+  const icon = L.divIcon({
+    html: `<div style="width:20px;height:20px;border-radius:50%;background:var(--accent);
+      border:3px solid #fff;box-shadow:0 0 12px rgba(0,212,255,0.8);"></div>`,
+    iconSize: [20, 20], iconAnchor: [10, 10], className: ''
+  });
+  state.userMarker = L.marker([55.751, 37.618], { icon }).addTo(state.map);
+}
+
+// ══════════════════════════════════════════════
+// GPS
+// ══════════════════════════════════════════════
+function startGPS() {
+  return new Promise(resolve => {
+    if (!navigator.geolocation) { resolve(); return; }
+    navigator.geolocation.getCurrentPosition(pos => {
+      updatePosition(pos);
+      state.watchId = navigator.geolocation.watchPosition(
+        updatePosition,
+        err => console.warn('GPS:', err),
+        { enableHighAccuracy: true, timeout: 10000 }
+      );
+      resolve();
+    }, () => resolve(), { enableHighAccuracy: true, timeout: 8000 });
+  });
+}
+
+function updatePosition(pos) {
+  state.lat = pos.coords.latitude;
+  state.lng = pos.coords.longitude;
+  const ll = [state.lat, state.lng];
+  state.userMarker.setLatLng(ll);
+  state.map.setView(ll, state.map.getZoom());
+  document.getElementById('coords-display').textContent =
+    state.lat.toFixed(4) + ', ' + state.lng.toFixed(4);
+  setStatusDot('active');
+}
+
+function locateMe() {
+  if (state.lat) {
+    state.map.setView([state.lat, state.lng], 17);
+    const addr = state.lat.toFixed(5) + ', ' + state.lng.toFixed(5);
+    speak('Ваши координаты: ' + addr);
+    setEngineStatus('📍 ' + addr);
+    showAlert('📍 Местоположение обновлено', 'info');
+  } else {
+    speak('GPS сигнал недоступен');
+    showAlert('⚠ GPS недоступен', 'warning');
+  }
+}
+
+// ══════════════════════════════════════════════
+// CAMERA
+// ══════════════════════════════════════════════
+async function startCamera() {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: { ideal: 'environment' }, width: { ideal: 640 }, height: { ideal: 480 } },
+      audio: false
+    });
+    const vid = document.getElementById('camera');
+    vid.srcObject = stream;
+    // Явно вызываем play() — нужно для iOS и некоторых Android
+    await vid.play();
+    await new Promise(r => {
+      if (vid.readyState >= 3) { r(); return; }
+      vid.addEventListener('canplay', r, { once: true });
+    });
+    // Синхронизируем размер canvas с реальным размером видео
+    const canvas = document.getElementById('overlay-canvas');
+    canvas.width  = vid.videoWidth  || 320;
+    canvas.height = vid.videoHeight || 240;
+  } catch (e) {
+    console.warn('Camera error:', e);
+    showAlert('⚠ Нет доступа к камере', 'warning');
+    speak('Нет доступа к камере. Проверьте разрешения браузера.');
+  }
+}
+
+// ══════════════════════════════════════════════
+// TENSORFLOW COCO-SSD
+// ══════════════════════════════════════════════
+async function loadTFModel() {
+  const tfEl = document.getElementById('tf-status');
+  // Проверяем доступность библиотек
+  if (typeof tf === 'undefined') {
+    tfEl.textContent = '❌ TF не загружен (CDN?)';
+    tfEl.className = 'err';
+    console.error('TensorFlow.js не загружен');
+    return;
+  }
+  if (typeof cocoSsd === 'undefined') {
+    tfEl.textContent = '❌ COCO-SSD не загружен';
+    tfEl.className = 'err';
+    console.error('COCO-SSD не загружен');
+    return;
+  }
+  try {
+    tfEl.textContent = '⏳ Загрузка модели (~10 МБ)...';
+    tfEl.className = 'load';
+    // Используем lite_mobilenet_v2 — самый быстрый вариант
+    state.tfModel = await cocoSsd.load({ base: 'lite_mobilenet_v2' });
+    state.tfLoaded = true;
+    tfEl.textContent = '✓ TensorFlow готов';
+    tfEl.className = 'ok';
+    setTimeout(() => { tfEl.style.opacity = '0'; }, 3000);
+  } catch(e) {
+    console.error('TF load error:', e);
+    tfEl.textContent = '❌ Ошибка: ' + e.message;
+    tfEl.className = 'err';
+  }
+}
+
+const DANGER_CLASSES = ['person','car','truck','bus','motorcycle','bicycle',
+  'traffic light','stop sign','fire hydrant','bench','potted plant','suitcase'];
+const OBSTACLE_ICONS = {
+  person:'🧑', car:'🚗', truck:'🚛', bus:'🚌', motorcycle:'🛵',
+  bicycle:'🚲', 'traffic light':'🚦', 'stop sign':'🛑',
+  'fire hydrant':'🚒', bench:'🪑', 'potted plant':'🪴', suitcase:'🧳',
+  default: '⚠️'
+};
+
+function getThreatLevel(cls, score) {
+  const dangers = ['car','truck','bus','motorcycle'];
+  const warns   = ['person','bicycle','traffic light','stop sign'];
+  if (dangers.includes(cls) && score > 0.5) return 'danger';
+  if (warns.includes(cls) && score > 0.4)   return 'warn';
+  return 'safe';
+}
+
+async function runTFDetection() {
+  if (!state.tfLoaded || !state.tfModel) return [];
+  const video = document.getElementById('camera');
+  // Ждём пока видео реально играет
+  if (!video.readyState || video.readyState < 3) return [];
+  if (video.videoWidth === 0 || video.videoHeight === 0) return [];
+  try {
+    // Порог 0.25 — замечает больше объектов
+    const preds = await state.tfModel.detect(video, undefined, 0.25);
+    drawBoxes(preds);
+    return preds;
+  } catch(e) {
+    console.warn('TF detect error:', e);
+    return [];
+  }
+}
+
+function drawBoxes(preds) {
+  const canvas = document.getElementById('overlay-canvas');
+  const ctx = canvas.getContext('2d');
+  const vid = document.getElementById('camera');
+  const scaleX = canvas.width  / (vid.videoWidth  || canvas.width);
+  const scaleY = canvas.height / (vid.videoHeight || canvas.height);
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  preds.forEach(p => {
+    if (p.score < 0.4) return;
+    const [x, y, w, h] = p.bbox;
+    const level = getThreatLevel(p.class, p.score);
+    const colors = { danger: '#ff2d55', warn: '#ffd60a', safe: '#00ff88' };
+    ctx.strokeStyle = colors[level];
+    ctx.lineWidth = 2;
+    ctx.strokeRect(x * scaleX, y * scaleY, w * scaleX, h * scaleY);
+    ctx.fillStyle = colors[level];
+    ctx.font = '10px Share Tech Mono';
+    ctx.fillText(p.class + ' ' + Math.round(p.score * 100) + '%',
+      x * scaleX + 2, y * scaleY - 3);
+  });
+}
+
+// ══════════════════════════════════════════════
+// CLAUDE VISION API
+// ══════════════════════════════════════════════
+async function runClaudeVision() {
+  if (!state.claudeKey) return null;
+  const video = document.getElementById('camera');
+  if (!video.readyState || video.readyState < 2) return null;
+
+  // Capture frame
+  const canvas = document.createElement('canvas');
+  canvas.width = 640; canvas.height = 480;
+  canvas.getContext('2d').drawImage(video, 0, 0, 640, 480);
+  const b64 = canvas.toDataURL('image/jpeg', 0.8).split(',')[1];
+
+  try {
+    const res = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': state.claudeKey,
+        'anthropic-version': '2023-06-01',
+        'anthropic-dangerous-direct-browser-access': 'true'
+      },
+      body: JSON.stringify({
+        model: 'claude-opus-4-5',
+        max_tokens: 300,
+        messages: [{
+          role: 'user',
+          content: [
+            {
+              type: 'image',
+              source: { type: 'base64', media_type: 'image/jpeg', data: b64 }
+            },
+            {
+              type: 'text',
+              text: `Ты помощник для незрячего человека. Опиши КРАТКО (2-3 предложения на русском):
+1. Главные препятствия (расстояние и опасность)
+2. Безопасный путь вперёд
+3. Любой важный контекст (светофор, знаки, люди)
+Начни сразу с описания, без вступления. Будь конкретным и кратким.`
+            }
+          ]
+        }]
+      })
+    });
+    const data = await res.json();
+    return data.content?.[0]?.text || null;
+  } catch(e) {
+    console.warn('Claude API error:', e);
+    return null;
+  }
+}
+
+// ══════════════════════════════════════════════
+// SCAN LOGIC
+// ══════════════════════════════════════════════
+async function scan() {
+  if (state.scanning) return;
+  state.scanning = true;
+  setStatusDot('warning');
+  showScanRing(true);
+
+  const results = { tf: [], claude: null };
+  const promises = [];
+
+  if (state.engine === 'tf' || state.engine === 'both') {
+    promises.push(runTFDetection().then(r => { results.tf = r; }));
+  }
+  if ((state.engine === 'claude' || state.engine === 'both') && state.claudeKey) {
+    promises.push(runClaudeVision().then(r => { results.claude = r; }));
+  }
+
+  await Promise.all(promises);
+
+  updateDetectionsList(results.tf);
+  buildSpeechOutput(results.tf, results.claude);
+
+  showScanRing(false);
+  setStatusDot(state.lat ? 'active' : 'warning');
+  state.scanning = false;
+}
+
+function buildSpeechOutput(tfPreds, claudeText) {
+  const dangerPreds = tfPreds.filter(p => getThreatLevel(p.class, p.score) === 'danger');
+  const warnPreds   = tfPreds.filter(p => getThreatLevel(p.class, p.score) === 'warn');
+
+  let msg = '';
+  let alertLevel = null;
+
+  if (claudeText) {
+    msg = claudeText;
+    if (dangerPreds.length > 0) alertLevel = 'danger';
+    else if (warnPreds.length > 0) alertLevel = 'warning';
+  } else if (tfPreds.length === 0) {
+    msg = 'Препятствий не обнаружено. Путь свободен.';
+  } else {
+    const parts = [];
+    if (dangerPreds.length > 0) {
+      alertLevel = 'danger';
+      parts.push('⚠ ОПАСНОСТЬ: ' + dangerPreds.map(p => p.class).join(', '));
+    }
+    if (warnPreds.length > 0) {
+      if (!alertLevel) alertLevel = 'warning';
+      parts.push('Внимание: ' + warnPreds.map(p => p.class).join(', '));
+    }
+    const safe = tfPreds.filter(p => getThreatLevel(p.class, p.score) === 'safe');
+    if (safe.length > 0) parts.push('Объекты: ' + safe.map(p => p.class).join(', '));
+    msg = parts.join('. ');
+  }
+
+  document.getElementById('speech-output').textContent = msg;
+  speak(msg);
+
+  if (alertLevel === 'danger') {
+    showAlert('⚠ ОПАСНОСТЬ ВПЕРЕДИ!', 'danger');
+    vibrate([200, 100, 200]);
+  } else if (alertLevel === 'warning') {
+    showAlert('⚠ Внимание!', 'warning');
+    vibrate([100]);
+  }
+}
+
+function updateDetectionsList(preds) {
+  const list = document.getElementById('detections-list');
+  if (preds.length === 0) {
+    list.innerHTML = '<div class="det-item safe"><span class="det-icon">✓</span><span>Путь свободен</span></div>';
+    return;
+  }
+  list.innerHTML = preds
+    .filter(p => p.score > 0.25)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 8)
+    .map(p => {
+      const level = getThreatLevel(p.class, p.score);
+      const icon  = OBSTACLE_ICONS[p.class] || OBSTACLE_ICONS.default;
+      return `<div class="det-item ${level}">
+        <span class="det-icon">${icon}</span>
+        <span>${p.class}</span>
+        <span class="det-score">${Math.round(p.score * 100)}%</span>
+      </div>`;
+    }).join('');
+}
+
+function manualScan() {
+  const btn = document.getElementById('scan-btn');
+  btn.classList.add('recording');
+  scan().finally(() => btn.classList.remove('recording'));
+}
+
+function startAutoScan() {
+  if (state.autoInterval) clearInterval(state.autoInterval);
+  if (state.settings.auto) {
+    state.autoInterval = setInterval(scan, 2500);
+  }
+}
+
+// ══════════════════════════════════════════════
+// NAVIGATION (OSM Nominatim + OSRM)
+// ══════════════════════════════════════════════
+function openDestModal()  { document.getElementById('dest-modal').classList.add('show'); setTimeout(() => document.getElementById('dest-input').focus(), 100); }
+function closeDestModal() { document.getElementById('dest-modal').classList.remove('show'); }
+
+async function startNavigation() {
+  const q = document.getElementById('dest-input').value.trim();
+  closeDestModal();
+  if (!q) return;
+
+  showAlert('🔍 Поиск маршрута...', 'info');
+  speak('Ищу маршрут до: ' + q);
+
+  try {
+    // Geocode with Nominatim
+    const geoRes = await fetch(
+      `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(q)}&format=json&limit=1`,
+      { headers: { 'Accept-Language': 'ru' } }
+    );
+    const geoData = await geoRes.json();
+    if (!geoData.length) {
+      speak('Место не найдено. Попробуйте другой запрос.');
+      showAlert('❌ Место не найдено', 'warning'); return;
+    }
+
+    const destLat = parseFloat(geoData[0].lat);
+    const destLng = parseFloat(geoData[0].lon);
+    state.destination = { lat: destLat, lng: destLng, name: geoData[0].display_name };
+
+    // Add destination marker
+    if (state.destMarker) state.map.removeLayer(state.destMarker);
+    const destIcon = L.divIcon({
+      html: `<div style="width:16px;height:16px;border-radius:50%;background:var(--accent2);
+        border:3px solid #fff;box-shadow:0 0 12px rgba(255,107,53,0.8);"></div>`,
+      iconSize: [16, 16], iconAnchor: [8, 8], className: ''
+    });
+    state.destMarker = L.marker([destLat, destLng], { icon: destIcon })
+      .bindPopup(geoData[0].display_name.split(',')[0])
+      .addTo(state.map);
+
+    // Route with OSRM
+    const fromLat = state.lat || 55.751;
+    const fromLng = state.lng || 37.618;
+    const routeRes = await fetch(
+      `https://router.project-osrm.org/route/v1/foot/${fromLng},${fromLat};${destLng},${destLat}?steps=true&geometries=geojson&overview=full`
+    );
+    const routeData = await routeRes.json();
+
+    if (routeData.routes?.length) {
+      if (state.routeLayer) state.map.removeLayer(state.routeLayer);
+      state.routeLayer = L.geoJSON(routeData.routes[0].geometry, {
+        style: { color: '#00d4ff', weight: 4, opacity: 0.8, dashArray: '8 4' }
+      }).addTo(state.map);
+
+      const dist = (routeData.routes[0].distance / 1000).toFixed(1);
+      const mins = Math.round(routeData.routes[0].duration / 60);
+      const dest = geoData[0].display_name.split(',')[0];
+      const msg = `Маршрут построен. До ${dest}: ${dist} км, около ${mins} минут пешком.`;
+      speak(msg);
+      setEngineStatus('🗺 ' + dest + ' · ' + dist + 'км · ' + mins + 'мин');
+      showAlert('✓ Маршрут построен', 'info');
+
+      // Fit map to route
+      const bounds = state.routeLayer.getBounds();
+      state.map.fitBounds(bounds, { padding: [40, 40] });
+
+      // Voice first step
+      if (routeData.routes[0].legs?.[0]?.steps?.[0]) {
+        const step = routeData.routes[0].legs[0].steps[0];
+        setTimeout(() => speak('Первый шаг: ' + (step.maneuver?.instruction || step.name || 'Начните движение')), 3000);
+      }
+    }
+  } catch(e) {
+    console.error(e);
+    speak('Ошибка построения маршрута.');
+    showAlert('❌ Ошибка маршрута', 'warning');
+  }
+}
+
+// ══════════════════════════════════════════════
+// ENGINE SWITCHER
+// ══════════════════════════════════════════════
+function setEngine(eng) {
+  state.engine = eng;
+  document.querySelectorAll('.engine-btn').forEach(b => b.classList.remove('active','tf'));
+  const btn = document.getElementById('btn-' + eng);
+  btn.classList.add('active');
+  if (eng === 'tf' || eng === 'both') btn.classList.add('tf');
+
+  const names = { tf: 'TensorFlow.js (локально)', claude: 'Claude Vision (облако)', both: 'Оба движка' };
+  speak('Движок: ' + names[eng]);
+  setEngineStatus('Движок: ' + names[eng]);
+}
+
+// ══════════════════════════════════════════════
+// SETTINGS
+// ══════════════════════════════════════════════
+function toggleSettings() {
+  document.getElementById('settings-drawer').classList.toggle('open');
+}
+function toggleSetting(key) {
+  state.settings[key] = !state.settings[key];
+  document.getElementById(key + '-toggle').classList.toggle('on', state.settings[key]);
+  if (key === 'auto') startAutoScan();
+}
+function saveApiKey() {
+  const key = document.getElementById('api-key-input').value.trim();
+  state.claudeKey = key;
+  localStorage.setItem('claude_key', key);
+  speak(key ? 'Claude Vision активирован' : 'API ключ удалён');
+  showAlert(key ? '✓ Claude Vision активирован' : '✓ Ключ удалён', 'info');
+  document.getElementById('api-notice').style.display = 'none';
+  toggleSettings();
+}
+
+// Pre-fill saved key
+if (state.claudeKey) document.getElementById('api-key-input').value = state.claudeKey;
+
+// ══════════════════════════════════════════════
+// UTILITIES
+// ══════════════════════════════════════════════
+const synth = window.speechSynthesis;
+function speak(text) {
+  if (!state.settings.tts) return;
+  const now = Date.now();
+  if (now - state.lastSpeak < 1200) return; // debounce
+  state.lastSpeak = now;
+  synth.cancel();
+  const u = new SpeechSynthesisUtterance(text);
+  u.lang = 'ru-RU'; u.rate = 1.1; u.pitch = 1;
+  synth.speak(u);
+}
+
+function vibrate(pattern) {
+  if (!state.settings.vib || !navigator.vibrate) return;
+  navigator.vibrate(pattern);
+}
+
+function setStatusDot(cls) {
+  const dot = document.getElementById('status-dot');
+  dot.className = 'status-dot ' + cls; // doesn't change id
+  dot.classList.add(cls);
+}
+
+function setEngineStatus(msg) {
+  document.getElementById('speech-output').textContent = msg;
+}
+
+function showAlert(msg, type) {
+  const banner = document.getElementById('alert-banner');
+  banner.textContent = msg;
+  banner.className = type + ' show';
+  setTimeout(() => banner.classList.remove('show'), 3000);
+}
+
+function showScanRing(on) {
+  document.getElementById('scan-ring').classList.toggle('show', on);
+}
+
+// Keyboard shortcuts (for accessibility)
+document.addEventListener('keydown', e => {
+  if (e.code === 'Space') { e.preventDefault(); manualScan(); }
+  if (e.code === 'KeyN')   openDestModal();
+  if (e.code === 'KeyL')   locateMe();
+});
+
+// ══════════════════════════════════════════════
+// START
+// ══════════════════════════════════════════════
+window.addEventListener('load', init);
+</script>
+</body>
+</html>
